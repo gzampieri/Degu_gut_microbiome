@@ -1,0 +1,914 @@
+---
+title: "Degu gut microbiome analysis"
+output: html_notebook
+---
+
+# Preliminaries
+Load packages
+```{r message=FALSE, warning=FALSE}
+library(dada2)
+library(phyloseq)
+library(DESeq2)
+library(DECIPHER)
+library(phangorn)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(ips)
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(vegan)
+library(facetscales)
+library(FactoMineR)
+library(factoextra)
+library(methods)
+library(egg)
+library(cowplot)
+```
+
+Set seed for reproducibility
+```{r}
+set.seed(100)
+```
+
+Set main paths
+```{r}
+work_path <- "working directory path" # edit here as needed
+setwd(work_path)
+```
+
+
+
+
+
+# Step 1: clean and filter 16s reads
+Raw data are imported from two subdirectories named "Degu raw data" and "Human raw data"
+
+### Clean degu reads
+Set path
+```{r}
+miseq_path <- paste0(work_path, "Degu raw data")
+length(list.files(miseq_path))
+```
+
+Plot quality scores to select trimming parameters (green is the mean, orange is the median, and
+the dashed orange lines are the 25th and 75th quantiles)
+```{r}
+fnFs <- sort(list.files(miseq_path, pattern="_L001_R1_001.fastq"))
+fnRs <- sort(list.files(miseq_path, pattern="_L001_R2_001.fastq"))
+sampleNames <- sapply(strsplit(fnFs, "_"), `[`, 1)
+sampleNames <- sapply(strsplit(sampleNames, "/"), `[`, 9)
+fnFs <- file.path(miseq_path, fnFs)
+fnRs <- file.path(miseq_path, fnRs)
+plotQualityProfile(fnFs[1:3])
+```
+
+```{r}
+plotQualityProfile(fnRs[1:3])
+```
+
+Set a subdirectory called "Degu quality filtered data" where to put cleaned reads
+```{r}
+filt_path <- paste0(work_path, "Degu quality filtered data")
+filtFs <- file.path(filt_path, paste0(sampleNames, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(sampleNames, "_R_filt.fastq.gz"))
+```
+
+Filter and trim reads
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(250,200),
+                     maxN = 0, maxEE = c(2,2), truncQ = 2, rm.phix = TRUE,
+                     compress = TRUE, multithread = TRUE)
+# in Windows please set multithread = FALSE
+head(out)
+```
+
+Dereplicate reads
+```{r}
+derepFs <- derepFastq(filtFs, verbose = FALSE)
+derepRs <- derepFastq(filtRs, verbose = FALSE)
+names(derepFs) <- sampleNames
+names(derepRs) <- sampleNames
+```
+
+Learn error model for the reads
+```{r}
+errF <- learnErrors(filtFs, randomize = TRUE, multithread = TRUE)
+errR <- learnErrors(filtRs, randomize = TRUE, multithread = TRUE)
+plotErrors(errF)
+```
+
+```{r}
+plotErrors(errR)
+```
+
+Correct errors
+```{r}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, pool = TRUE)
+dadaRs <- dada(derepRs, err = errF, multithread = TRUE, pool = TRUE)
+dadaFs[[1]]
+```
+
+1. Merge forward and reverse reads
+2. Construct final sequence table
+3. Remove chimeras
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs)
+seqtabAll <- makeSequenceTable(mergers)
+print(dim(seqtabAll))
+seqtabNoC.degu <- removeBimeraDenovo(seqtabAll)
+print(dim(seqtabNoC.degu))
+```
+
+### Clean human reads
+Set path
+```{r}
+miseq_path <- paste0(work_path, "Human raw data")
+length(list.files(miseq_path))
+```
+
+Plot quality scores to select trimming parameters (green is the mean, orange is the median, and
+the dashed orange lines are the 25th and 75th quantiles)
+```{r}
+fnFs <- sort(list.files(miseq_path, pattern="_R1.fastq.gz"))
+fnRs <- sort(list.files(miseq_path, pattern="_R2.fastq.gz"))
+sampleNames <- sapply(strsplit(fnFs, "_"), `[`, 1)
+sampleNames <- sapply(strsplit(sampleNames, "/"), `[`, 9)
+fnFs <- file.path(miseq_path, fnFs)
+fnRs <- file.path(miseq_path, fnRs)
+plotQualityProfile(fnFs[1:3])
+```
+
+```{r}
+plotQualityProfile(fnRs[1:3])
+```
+
+Set a subdirectory called "Human quality filtered data" where to put cleaned reads
+```{r}
+filt_path <- paste0(work_path, "Human quality filtered data")
+filtFs <- file.path(filt_path, paste0(sampleNames, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(sampleNames, "_R_filt.fastq.gz"))
+```
+
+Filter and trim reads
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(175,110),
+                     maxN = 0, maxEE = c(2,2), truncQ = 2, rm.phix = TRUE,
+                     compress = TRUE, multithread = TRUE)
+head(out)
+```
+
+Dereplicate reads
+```{r}
+derepFs <- derepFastq(filtFs, verbose = FALSE)
+derepRs <- derepFastq(filtRs, verbose = FALSE)
+names(derepFs) <- sampleNames
+names(derepRs) <- sampleNames
+```
+
+Learn error model for the reads (takes around 30 mins)
+```{r}
+errF <- learnErrors(filtFs, randomize = TRUE, multithread = TRUE)
+errR <- learnErrors(filtRs, randomize = TRUE, multithread = TRUE)
+plotErrors(errF)
+```
+
+```{r}
+plotErrors(errR)
+```
+
+Correct errors (takes around 10 mins)
+```{r}
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE, pool = "pseudo")
+dadaRs <- dada(derepRs, err = errF, multithread = TRUE, pool = "pseudo")
+dadaFs[[1]]
+```
+
+1. Merge forward and reverse reads
+2. Construct final sequence table
+3. Remove chimeras
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs)
+seqtabAll <- makeSequenceTable(mergers)
+print(dim(seqtabAll))
+seqtabNoC.human <- removeBimeraDenovo(seqtabAll)
+print(dim(seqtabNoC.human))
+```
+
+### Combine degu and human sequences
+1. Trim sequences spanning V3-V4 regions so that they span V4 only
+2. Sum abundances of equal V4 sequences obtained
+```{r}
+trimmed_seq <- TrimDNA(DNAStringSet(colnames(seqtabNoC.degu)), "GTGCCAGCMGCCGCGGTAA", "", 
+                        type="sequences", maxDistance = 0.15, verbose = FALSE)
+
+colnames(seqtabNoC.degu) <- as.vector(trimmed_seq)
+seqtabTrim.degu <- collapseNoMismatch(seqtabNoC.degu, identicalOnly = TRUE)
+print(dim(seqtabTrim.degu))
+```
+
+1. Merge degu and human abundance tables
+2. Merge sequences that are equal on overlapping regions
+```{r}
+seqtabMerged <- mergeSequenceTables(seqtabNoC.human, seqtabTrim.degu, orderBy = "nsamples")
+print(dim(seqtabMerged))
+seqtabCollapsed <- collapseNoMismatch(seqtabMerged)
+print(dim(seqtabCollapsed))
+```
+
+Save data for step 1
+```{r}
+write.csv(seqtabCollapsed, file = paste0(work_path, "seqtabCollapsed.csv"))
+save.image(paste0(work_path, "step1.RData"))
+```
+
+
+
+
+
+
+# Step 2: determine, clean and filter taxonomy
+Download silva_nr_v132_train_set.fa from http://doi.org/10.5281/zenodo.1172783.
+
+### Assign taxonomy 
+(~30 min)
+```{r}
+fastaRef <- "path to silva_nr_v132_train_set.fa.gz" # edit here as needed
+taxTab <- assignTaxonomy(seqtabCollapsed, refFasta = fastaRef, multithread = TRUE)
+write.csv(taxTab, file = paste0(work_path, "taxTab.csv"))
+```
+
+### Merge degu and human sample data
+Load degu and human metadata table
+```{r}
+sam.degu <- read.table(paste0(work_path, "Degu sample metadata.tsv"),
+                    header=TRUE, sep = "\t")
+sam.human <- read.table(paste0(work_path, "sample-metadata-anonymized.tsv"),
+                    header=TRUE, sep = "\t")
+```
+
+Merge metadata tables
+```{r}
+sam.degu$Condition <- mapvalues(sam.degu$Condition, "AD-like", "AD")
+colnames(sam.degu) <- mapvalues(colnames(sam.degu), "APOE_Mt4", "APOE4")
+colnames(sam.human) <- mapvalues(colnames(sam.human), "Subject", "Sample_id")
+colnames(sam.human) <- mapvalues(colnames(sam.human), "Diagnosis", "Condition")
+sam.human$Sex <- NULL
+sam.human$Age <- NULL
+
+samMerged <- merge(x = sam.human, y = sam.degu, by = c("Sample_id", "Condition", "APOE4"), all = TRUE, sort = FALSE)
+samMerged$Host <- as.factor(c(rep("Human", dim(sam.human)[1]), rep("Degu", dim(sam.degu)[1])))
+rownames(samMerged) <- samMerged$Sample_id
+
+# check whether the rownames match
+all(rownames(seqtabCollapsed) %in% rownames(samMerged))
+```
+
+Create phyloseq object with all the extracted and cleaned information
+```{r}
+ps <- phyloseq(otu_table(seqtabCollapsed, taxa_are_rows = FALSE), 
+               sample_data(samMerged), 
+               tax_table(taxTab))
+ps <- prune_samples(sample_names(ps) != "Mock", ps)
+ps <- subset_taxa(ps, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
+ps
+```
+
+### Filter taxonomy
+Create data frame with the prevalence of each taxonomic group and level
+```{r}
+prevdf = apply(X = otu_table(ps),
+               MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps),
+                    tax_table(ps))
+
+# show prevalence mean, median, 4th quartile, max and sum
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence), median(df1$Prevalence),
+                    quantile(df1$Prevalence, 0.75), max(df1$Prevalence), sum(df1$Prevalence))}) -> dfprev
+kable(dfprev, format = "markdown")
+```
+
+Filter out lowly prevalent taxa based on taxonomy
+```{r}
+filterPhyla = c("Deferribacteres", "Epsilonbacteraeota", "Fibrobacteres", "Fusobacteria", "Lentisphaerae", "Synergistetes")
+ps1 = subset_taxa(ps, !Phylum %in% filterPhyla)
+ps1
+```
+
+Other filters based on taxonomy
+```{r}
+filterPhyla2 <- c("Chloroplast", "Mitochondria", "Archaea", "Eukaryota")
+ps1 <- subset_taxa(ps1, !Kingdom %in% filterPhyla2)
+ps1 <- subset_taxa(ps1, !Phylum %in% filterPhyla2)
+ps1 <- subset_taxa(ps1, !Class %in% filterPhyla2)
+ps1 <- subset_taxa(ps1, !Order %in% filterPhyla2)
+ps1 <- subset_taxa(ps1, !Family %in% filterPhyla2)
+ps1 <- subset_taxa(ps1, !Genus %in% filterPhyla2)
+
+# filter out samples with less than 1000 reads (if any)
+ps2 <- prune_samples(sample_sums(ps1) > 1000, ps1)
+ps2
+```
+
+Filter out lowly prevalent taxa based on prevalence distributions
+```{r}
+prevdf = apply(X = otu_table(ps2),
+               MARGIN = ifelse(taxa_are_rows(ps2), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps2),
+                    tax_table(ps2))
+prevdf1 = subset(prevdf, Phylum %in% get_taxa_unique(ps2, "Phylum"))
+ggplot(prevdf1, aes(TotalAbundance, Prevalence / nsamples(ps2), color=Phylum)) +
+  # Adding a line to the plot
+  geom_hline(yintercept = 0.08, alpha = 0.5, linetype = 2) +  geom_point(size = 2, alpha = 0.7) +
+  scale_x_log10() +  xlab("Total Abundance") + ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) + theme(legend.position="none")
+```
+
+
+```{r}
+# Defining prevalence threshold at 10% 
+prevalenceThreshold = 0.08 * nsamples(ps2)
+
+# Execute prevalence filter, using `prune_taxa()` function
+keepTaxa = rownames(prevdf1)[(prevdf1$Prevalence >= prevalenceThreshold)]
+ps3 = prune_taxa(keepTaxa, ps2)
+ps3
+```
+
+Save data for step 2
+```{r}
+remove(derepFs, derepRs) # lighten following saves
+save.image(paste0(work_path, "step2.RData"))
+```
+
+
+
+
+
+
+# Step 3 - Construct phylogenetic tree
+
+### Multiple alignment
+1. Rename taxa as amplicon sequence variants (ASVs)
+2. Multiple alignment (takes around 45 min)
+```{r}
+seqs <- taxa_names(ps3)
+names(seqs) <- paste0("ASV", seq(ntaxa(ps3)))
+alignment <- AlignSeqs(DNAStringSet(seqs), anchor = NA, verbose = FALSE, processors = NULL)
+```
+
+### Tree inference
+Convert the alignment to matrix
+```{r}
+phangAlign <- phyDat(as(alignment, "matrix"), type = "DNA")
+write.phyDat(phangAlign, file = paste0(work_path, "alignment.fasta"), format = "fasta")
+```
+
+Use RAxML to contruct the phylogenetic tree
+```{r}
+TS3alignment <- read.dna(paste0(work_path, "alignment.fasta"), format = "fasta", as.matrix = TRUE)
+alignment.rax.gtr <- raxml(TS3alignment,
+  m = "GTRGAMMAIX",
+  f = "d",
+  p = 1234,
+  N = 1,
+  exec = "path to raxmlHPC-PTHREADS-SSE3", # edit here as needed
+  threads = 12,
+  file = "degu"
+)
+```
+
+Import RAxML phylogenetic tree
+```{r}
+tree <- read_tree(paste0(work_path, "RAxML_bestTree.degu"))
+```
+
+Reroot the tree
+```{r}
+pick_new_outgroup <- function(tree.unrooted){
+    require("magrittr")
+    require("data.table")
+    require("ape") # ape::Ntip
+    # tablify parts of tree that we need.
+    treeDT <- 
+      cbind(
+        data.table(tree.unrooted$edge),
+        data.table(length = tree.unrooted$edge.length)
+      )[1:Ntip(tree.unrooted)] %>% 
+      cbind(data.table(id = tree.unrooted$tip.label))
+    # Take the longest terminal branch as outgroup
+    new.outgroup <- treeDT[which.max(length)]$id
+    return(new.outgroup)
+}
+
+new.outgroup = pick_new_outgroup(tree)
+rootedTree = ape::root(tree, outgroup = new.outgroup, resolve.root = TRUE)
+```
+
+Add tree to a phyloseq object
+```{r}
+psFinal <- ps3
+taxa_names(psFinal) <- paste0("ASV", seq(ntaxa(psFinal)))
+psFinal <- merge_phyloseq(psFinal, DNAStringSet(seqs))
+phy_tree(psFinal) <- rootedTree
+psFinal
+```
+
+Save data for step 3
+```{r}
+save.image(paste0(work_path, "step3.RData"))
+```
+
+
+
+
+
+
+# Step 4: ASV analysis
+
+Normalize counts
+```{r}
+psFinal@sam_data$Condition <- factor(psFinal@sam_data$Condition, levels = c("AD", "Control"), ordered = TRUE)
+psFinal@sam_data$Host <- factor(psFinal@sam_data$Host, levels = c("Degu", "Human"), ordered = TRUE)
+psFinal@sam_data$APOE4 <- factor(psFinal@sam_data$APOE4, levels = c("Positive", "Negative"), ordered = TRUE)
+
+psFinal.disease <- subset_samples(psFinal, Condition %in% c("AD"))
+psFinal.degu <- subset_samples(psFinal, Host %in% c("Degu"))
+psFinal.human <- subset_samples(psFinal, Host %in% c("Human"))
+psFinal.degu.disease <- subset_samples(psFinal.degu, Condition %in% c("AD"))
+psFinal.human.disease <- subset_samples(psFinal.human, Condition %in% c("AD"))
+
+ps.prop <- transform_sample_counts(psFinal, function(x) x/sum(x))
+ps.prop.disease <- transform_sample_counts(psFinal.disease, function(x) x/sum(x))
+ps.prop.degu <- transform_sample_counts(psFinal.degu, function(x) x/sum(x))
+ps.prop.human <- transform_sample_counts(psFinal.human, function(x) x/sum(x))
+ps.prop.degu.disease <- transform_sample_counts(psFinal.degu.disease, function(x) x/sum(x))
+```
+
+Functions and color scales 
+```{r}
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+annotation_custom2 <- 
+function (grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, data) 
+{
+  layer(data = data, stat = StatIdentity, position = PositionIdentity, size = 1,
+        geom = ggplot2:::GeomCustomAnn,
+        inherit.aes = TRUE, params = list(grob = grob, 
+                                          xmin = xmin, xmax = xmax, 
+                                          ymin = ymin, ymax = ymax, size = 0.3))
+}
+
+# Create a custom color scale for phyla
+library(RColorBrewer)
+myColors <- brewer.pal(name = "Spectral", n = 10)
+names(myColors) <- levels(as.factor(psFinal@tax_table[, "Phylum"]))
+colScale_fill <- scale_fill_manual(name = "Phylum", values = myColors, drop = FALSE)
+colScale_color <- scale_color_manual(name = "Phylum", values = myColors, drop = FALSE)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Color definition for host
+Host_cols <- gg_color_hue(2)
+# for AD
+AD_cols <- c("AD" = "red", "Control" = "darkgreen")
+# and APOE
+APOE_cols <- c("Positive" = "darkblue", "Negative" = "grey60")
+
+theme_set(theme_pubr(border = TRUE, margin = FALSE, legend = "right", base_size = 5))
+```
+
+### Phylum relative abundance across samples
+```{r}
+##### degu #####
+d <- ps.prop.degu
+d@otu_table[,] <- 100 * d@otu_table[,]
+d@sam_data <- d@sam_data[with(d@sam_data, order(Condition, APOE4)), ]
+d@sam_data$dummy_column <- rep(1,nrow(d@sam_data))
+
+p1 = plot_bar(d, x = "Sample", fill = "Phylum") + 
+  scale_fill_brewer(palette = "Spectral") +
+  scale_color_brewer(palette = "Spectral") +
+  geom_bar(aes(color = Phylum, fill = Phylum), stat="identity", position = "stack", size = 0.05) + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 5, margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")), axis.line = element_blank(), axis.title = element_text(size = 7), axis.title.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0, unit = "pt")), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), plot.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")) +
+  ylab("Relative abundance (%)")
+p1$data$Sample <- factor(p1$data$Sample, levels = d@sam_data$Sample_id)
+
+# AD tiles
+tile1a <- ggplot(d@sam_data, aes(y = dummy_column, x = Sample_id)) +
+  geom_bar(aes(fill = Condition, color = Condition), stat = "identity", position = "stack") +
+  scale_colour_manual(values = AD_cols) +
+  scale_fill_manual(values = AD_cols) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(size = 7, angle = 0, vjust = 0.5), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank(), plot.margin = margin(t = 0, r = 0, b = 3, l = 5, unit = "pt"), plot.title = element_text(size = 8, face = "bold"), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")) +
+  ggtitle("Degu") + ylab("Condition")
+tile1a$data$Sample_id <- factor(tile1a$data$Sample_id, levels = d@sam_data$Sample_id)
+# APOE tiles
+tile1b <- ggplot(d@sam_data, aes(y = dummy_column, x = Sample_id)) +
+  geom_bar(aes(fill = APOE4, color = APOE4), stat = "identity", position = "stack") +
+  scale_colour_manual(values = APOE_cols) +
+  scale_fill_manual(values = APOE_cols) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(size = 7, angle = 0, vjust = 0.75), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank(), plot.margin = margin(t = 0, r = 0, b = 0, l = 5, unit = "pt"), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")) + ylab("APOE Mt4/\nAPOE4") + guides(fill=guide_legend(title="APOE Mt4/APOE4"), color=guide_legend(title="APOE Mt4/APOE4"))
+tile1b$data$Sample_id <- factor(tile1b$data$Sample_id, levels = d@sam_data$Sample_id)
+
+##### human #####
+d <- ps.prop.human
+d@otu_table[,] <- 100 * d@otu_table[,]
+d@sam_data <- d@sam_data[with(d@sam_data, order(Condition, APOE4)), ]
+d@sam_data$dummy_column <- rep(1,nrow(d@sam_data))
+
+p2 = plot_bar(d, x = "Sample", fill = "Phylum") + 
+  scale_fill_brewer(palette = "Spectral") +
+  scale_color_brewer(palette = "Spectral") +
+  geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack", size = 0.05) + 
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank(), axis.ticks = element_blank(), axis.line = element_blank(), axis.title.x = element_text(size = 7, margin = margin(t = 0, r = 0, b = 5, l = 0, unit = "pt")), axis.title.y = element_blank(), legend.title = element_text(size = 7), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), plot.title = element_text(size = 8), plot.margin = margin(t = 0, r = 0, b = 0, l = 5, unit = "pt")) +
+  xlab("Sample")
+p2$data$Sample <- factor(p2$data$Sample, levels = d@sam_data$Sample_id)
+
+# AD tiles
+tile2a <- ggplot(d@sam_data, aes(y = dummy_column, x = Sample_id)) +
+  geom_bar(aes(fill = Condition, color = Condition), stat = "identity", position = "stack") +
+  scale_colour_manual(values = AD_cols) +
+  scale_fill_manual(values = AD_cols) +
+  theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank(), plot.margin = margin(t = 0, r = 0, b = 3, l = 5, unit = "pt"), legend.position = "none", plot.title = element_text(size = 8, face = "bold")) +
+  ggtitle("Human")
+tile2a$data$Sample_id <- factor(tile2a$data$Sample_id, levels = d@sam_data$Sample_id)
+# APOE tiles
+tile2b <- ggplot(d@sam_data, aes(y = dummy_column, x = Sample_id)) +
+  geom_bar(aes(fill = APOE4, color = APOE4), stat = "identity", position = "stack") +
+  scale_colour_manual(values = APOE_cols) +
+  scale_fill_manual(values = APOE_cols) +
+  theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank(), legend.position = "none", plot.margin = margin(t = 0, r = -17, b = 0, l = 5, unit = "pt"))
+tile2b$data$Sample_id <- factor(tile2b$data$Sample_id, levels = d@sam_data$Sample_id)
+
+# legends
+leg1 <- g_legend(p1)
+leg2 <- g_legend(tile1a)
+leg3 <- g_legend(tile1b)
+
+# blank plot
+g1 <- ggarrange(tile1a + theme(legend.position="none"), tile1b + theme(legend.position="none"), p1 + theme(legend.position="none"), nrow = 3, ncol = 1, heights = c(1,1,17), byrow = FALSE, draw = FALSE)
+g2 <- ggarrange(tile2a, tile2b, p2 + theme(legend.position="none"), nrow = 3, ncol = 1, heights = c(1,1,17), byrow = FALSE, draw = FALSE)
+
+fg1 <- gtable_frame(g1)
+fg2 <- gtable_frame(g2)
+fg12 <- gtable_frame(gtable_cbind(fg1, fg2),
+               width = unit(3, "null"),
+               height = unit(1, "null"))
+fg3 <- gtable_frame(ggplotGrob(ggdraw(gtable_rbind(leg2, leg3, leg1))), # intricate but it works
+               width = unit(1.2, "null"),
+               height = unit(1, "null"))
+ggdraw(gtable_cbind(fg12, fg3))
+```
+
+### Alpha-diversity comparison between hosts
+```{r}
+p = plot_richness(psFinal, x = "Host", color = "Host", measures = c("Shannon")) +
+  geom_boxplot(alpha = 0.1, outlier.shape = NA, size = 0.2, show.legend = FALSE) +
+  geom_point(size = 0.5, alpha = 1, position = position_jitter(width = 0.25)) +
+  stat_compare_means(comparisons = list(c("Degu", "Human")), method = "wilcox.test", label = "p.signif", size = 1.5, tip.length = 0, label.y.npc = 0.5, bracket.size = 0.2) +
+  theme(plot.title = element_text(size = 8), axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.ticks.y = element_line(size = 0.5), axis.line = element_blank(), axis.title = element_text(size = 7),  legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6),legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), strip.text.x = element_blank(), strip.background = element_blank()) +
+  scale_color_hue() +
+  ylab("Alpha diversity") 
+p$layers <- p$layers[-1]
+p
+```
+
+### Multi-dimensional scaling with weighted Unifrac distance for disease samples
+```{r}
+out.wunifrac <- ordinate(ps.prop.disease, method = "NMDS", distance = "wunifrac")
+p <- plot_ordination(ps.prop.disease, out.wunifrac, type = "samples", color = "Host", shape = "APOE4")
+
+ggplot(p$data, aes(x = NMDS1, y = NMDS2, color = Host, fill = Host, shape = APOE4)) +
+  geom_point(color = "black", size = 1.5, stroke = 0.2) +
+  stat_ellipse(alpha = 0.5, show.legend = FALSE) +
+  theme(plot.title = element_text(size = 8, face = "bold"), axis.title = element_text(size = 7), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), plot.margin = margin(t = 2, r = 5, b = 2, l = 5, unit = "pt"), panel.border = element_rect(colour = "black", fill = NA, size = 0.5), axis.ticks = element_line(size = 0.5)) + scale_fill_hue() + scale_color_hue() + scale_shape_manual(values = c(21, 24)) + ggtitle("Weighted UniFrac distance") + guides(fill = guide_legend(override.aes=list(shape=21), order = 1), shape = guide_legend(title="APOE Mt4/\nAPOE4", order = 2))
+```
+
+PERMANOVA and PERMDISP2 based on weighted Unifrac distance
+```{r}
+adonis(formula = phyloseq::distance(ps.prop.degu.disease, "wunifrac") ~ APOE4, data = as.data.frame(sample_data(ps.prop.degu.disease)), permutations = 10000)
+
+beta <- betadisper(phyloseq::distance(ps.prop.degu.disease, "wunifrac"), data.frame(sample_data(ps.prop.degu.disease))$APOE4, sqrt.dist = FALSE)
+permutest(beta, permutations = 10000)
+```
+
+### Alpha diversity comparison between APOE4 and non-APOE4 in both degu and human
+```{r}
+p1 = plot_richness(psFinal.degu.disease, x = "APOE4", color = "APOE4", measures = c("Shannon"), title = "Degu", sortby = "Shannon") +
+  geom_boxplot(alpha = 0.1, outlier.shape = NA, size = 0.2, show.legend = FALSE) +
+  geom_point(size = 0.5, alpha = 1, position = position_jitter(width = 0.25)) +
+  stat_compare_means(comparisons = list(c("Positive", "Negative")), method = "wilcox.test", label = "p.signif", size = 1.5, tip.length = 0, bracket.size = 0.2) +
+  theme(plot.title = element_text(size = 8, face = "bold"), axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.ticks.y = element_line(size = 0.5), axis.line = element_blank(), axis.title = element_text(size = 7),  legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), strip.text.x = element_blank(), strip.background = element_blank()) +
+  scale_colour_manual(values = APOE_cols) +
+  ylab("Alpha diversity") + 
+  guides(color = guide_legend(title="APOE Mt4/\nAPOE4"))
+p1$layers <- p1$layers[-1]
+
+p2 = plot_richness(psFinal.human.disease, x = "APOE4", color = "APOE4", measures = c("Shannon"), title = "Human", sortby = "Shannon") +
+  geom_boxplot(alpha = 0.1, outlier.shape = NA, size = 0.2, show.legend = FALSE) +
+  geom_point(size = 0.5, alpha = 1, position = position_jitter(width = 0.25)) +
+  stat_compare_means(comparisons = list(c("Positive", "Negative")), method = "wilcox.test", label = "p.signif", size = 1.5, tip.length = 0, bracket.size = 0.2) +
+  theme(plot.title = element_text(size = 8, face = "bold"), axis.text.x = element_blank(), axis.title = element_blank(), axis.ticks.x = element_blank(), axis.ticks.y = element_line(size = 0.5), axis.line = element_blank(), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6),legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), strip.text.x = element_blank(), strip.background = element_blank()) + 
+  scale_colour_manual(values = APOE_cols) +
+  ylab("Alpha diversity") + 
+  guides(color = guide_legend(title="APOE Mt4/\nAPOE4"))
+p2$layers <- p2$layers[-1]
+
+leg1 <- g_legend(p2)
+
+egg::ggarrange(p1 + theme(legend.position="none"), p2 + theme(legend.position="none"), ggdraw(leg1), ncol = 3, widths = c(1.1,1.1,0.8))
+```
+
+### ASV differential abundance between APOE4 and non-APOE4 in both degu and human
+Define geometric mean
+```{r}
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+```
+
+Degu: create DESeq object
+```{r}
+diagdds.degu.disease = phyloseq_to_deseq2(psFinal.degu.disease, ~ APOE4)
+diagdds.degu.disease$APOE4 <- relevel(diagdds.degu.disease$APOE4, ref = "Negative")
+```
+
+Estimate differential abundance
+```{r}
+# calculate geometric means prior to estimate size factors
+geoMeans = apply(counts(diagdds.degu.disease), 1, gm_mean)
+diagdds.degu.disease = estimateSizeFactors(diagdds.degu.disease, geoMeans = geoMeans)
+
+# Normalization and parametric test
+diagdds.degu.disease = DESeq(diagdds.degu.disease, test="Wald", fitType="local")
+```
+
+Construct result table
+```{r}
+# Save results in res object
+res.degu.disease = results(diagdds.degu.disease, cooksCutoff = FALSE)
+# Sort the table according to p value
+res.degu.disease = res.degu.disease[order(res.degu.disease$padj, na.last=NA), ]
+
+alpha = 0.05
+sigtab.degu.disease = res.degu.disease[which(res.degu.disease$padj < alpha), ]
+sigtab.degu.disease = cbind(as(sigtab.degu.disease, "data.frame"), as(tax_table(psFinal.degu.disease)[rownames(sigtab.degu.disease), ], "matrix"))
+head(sigtab.degu.disease)
+```
+
+Human: create DESeq object
+```{r}
+diagdds.human.disease = phyloseq_to_deseq2(psFinal.human.disease, ~ APOE4)
+diagdds.human.disease$APOE4 <- relevel(diagdds.human.disease$APOE4, ref = "Negative")
+```
+
+Estimate differential abundance
+```{r}
+# calculate geometric means prior to estimate size factors
+geoMeans = apply(counts(diagdds.human.disease), 1, gm_mean)
+diagdds.human.disease = estimateSizeFactors(diagdds.human.disease, geoMeans = geoMeans)
+
+# Normalization and parametric test
+diagdds.human.disease = DESeq(diagdds.human.disease, test="Wald", fitType="local")
+```
+
+Construct result table
+```{r}
+# Save results in res object
+res.human.disease = results(diagdds.human.disease, cooksCutoff = FALSE)
+# Sort the table according to p value
+res.human.disease = res.human.disease[order(res.human.disease$padj, na.last=NA), ]
+
+alpha = 0.05
+sigtab.human.disease = res.human.disease[which(res.human.disease$padj < alpha), ]
+sigtab.human.disease = cbind(as(sigtab.human.disease, "data.frame"), as(tax_table(psFinal.human.disease)[rownames(sigtab.human.disease), ], "matrix"))
+head(sigtab.human.disease)
+```
+
+Plot
+```{r}
+d1 = sigtab.degu.disease
+d2 = sigtab.human.disease
+d1 = cbind(d1, Host = rep("Degu", nrow(d1)))
+d2 = cbind(d2, Host = rep("Human", nrow(d2)))
+sigtabgen = rbind(d1, d2)
+
+# aggregate lowest available taxonomy
+lowest_taxon = rep(NA, nrow(sigtabgen))
+lowest_taxon[!is.na(sigtabgen$Genus)] <- paste(sigtabgen$Family[!is.na(sigtabgen$Genus)], sigtabgen$Genus[!is.na(sigtabgen$Genus)], sep = " | ")
+lowest_taxon[!is.na(sigtabgen$Family) & is.na(sigtabgen$Genus)] <- as.character(sigtabgen$Family[!is.na(sigtabgen$Family) & is.na(sigtabgen$Genus)])
+lowest_taxon[!is.na(sigtabgen$Order) & is.na(sigtabgen$Family)] <- as.character(sigtabgen$Order[!is.na(sigtabgen$Order) & is.na(sigtabgen$Family)])
+lowest_taxon[!is.na(sigtabgen$Class) & is.na(sigtabgen$Order)] <- as.character(sigtabgen$Class[!is.na(sigtabgen$Class) & is.na(sigtabgen$Order)])
+
+lowest_taxon <- factor(lowest_taxon, levels = sort(unique(lowest_taxon), decreasing = TRUE))
+sigtabgen <- cbind(sigtabgen, lowest_taxon)
+sigtabgen$dummy_column <- rep(1,nrow(sigtabgen))
+
+p1 <- ggplot(sigtabgen[!duplicated(sigtabgen[,c('lowest_taxon')]),], aes(y=lowest_taxon, x=dummy_column)) +
+  geom_text(aes(label = lowest_taxon, hjust = "right"), size = 1.77) +
+  facet_grid(rows = "Phylum", scales = "free", space = "free") +
+  ylab("Lowest taxonomical classification") +
+  theme(axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.line = element_blank(), legend.position = "none", strip.text.y = element_blank(), strip.background = element_blank(), plot.margin = margin(t = 0, r = -21, b = 0, l = -10, unit = "pt")) +
+  xlim(c(0, 1.1))
+
+p2 <- ggplot(sigtabgen, aes(y=lowest_taxon, x=log2FoldChange, fill=Host)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.4) +
+  geom_point(color = "black", size = 1.8, shape = 21, stroke = 0.2) + 
+  facet_grid(rows = "Phylum", scales = "free", space = "free") +
+  xlab(expression('Fold change (log'[2]*' scale)')) +
+  theme(plot.title = element_text(size = 8, face = "bold"), axis.title.x = element_text(size = 7), axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank(), legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), panel.grid.major.y = element_line(colour="grey", linetype="dashed", size = 0.2), plot.margin = margin(t = 2, r = 5, b = 2, l = 5, unit = "pt"), axis.line.y = element_blank(), axis.ticks.x = element_line(size = 0.5), strip.text.y = element_blank(), strip.background = element_blank())
+
+egg::ggarrange(p1, p2, ncol = 2, widths = c(3,2.5))
+```
+
+### Taxon differential abundance over all taxonomic levels
+APOE Mt4 positive vs negative in AD-like degu
+```{r}
+tabTot <- data.frame(matrix(nrow = 0, ncol = 4))
+sigtabTot <- data.frame(matrix(nrow = 0, ncol = 4))
+names(tabTot) <- c("Level", "Name", "p", "p.adj")
+names(sigtabTot) <- c("Level", "Name", "p", "p.adj")
+taxLevels <- c("Genus", "Family", "Order", "Class", "Phylum")
+
+# loop over taxonomical levels
+for (i in c(1:5)) {
+  psTest <- subset_taxa(ps.prop.degu.disease, ps.prop.degu.disease@tax_table[,7-i] != "NA")
+  psTest = tax_glom(psTest, taxLevels[i])
+  mphyseq = psmelt(psTest)
+  mphyseq <- subset(mphyseq, Abundance > 0)
+  mphyseq$APOE4 <- factor(mphyseq$APOE4, levels = c("Positive", "Negative"))
+  unique_taxa <- unique(mphyseq[, ncol(mphyseq)])
+  pvals <- matrix(nrow = length(unique_taxa), ncol = 1)
+  # Wicoxon test for each taxa in the level
+  for (j in c(1:length(unique_taxa))) {
+    x <- mphyseq$Abundance[mphyseq$APOE4 == "Positive" & mphyseq[, ncol(mphyseq)] == unique_taxa[j]]
+    y <- mphyseq$Abundance[mphyseq$APOE4 == "Negative" & mphyseq[, ncol(mphyseq)] == unique_taxa[j]]
+    pvals[j] <- ifelse(length(x) > 0 & length(y) > 0, wilcox.test(x, y)$p.value, NA)
+  }
+  # Benjamini-Hochberg correction
+  padj <- p.adjust(pvals, method = "BH")
+  # merge results
+  tab <- data.frame(Level = rep(taxLevels[i], length(unique_taxa)), Name = unique_taxa, p = pvals, p.adj = padj)
+  sigtab = tab[which(tab$p.adj < 0.05), ]
+  tabTot = merge(tab, tabTot, all = TRUE, sort = FALSE)
+  sigtabTot = merge(sigtab, sigtabTot, all = TRUE, sort = FALSE)
+}
+
+sigtabTot
+```
+
+Plot Verrucomicrobia differential abundance
+```{r}
+psPlot <- tax_glom(ps.prop.degu.disease, "Phylum")
+mphyseq <- psmelt(psPlot)
+mphyseq <- mphyseq[mphyseq$Phylum == "Verrucomicrobia", ]
+mphyseq$Abundance <- mphyseq$Abundance * 100
+mphyseq$APOE4 <- factor(mphyseq$APOE4, levels = c("Positive", "Negative"))
+
+ggplot(mphyseq, aes(y=Abundance, x=APOE4, color=APOE4)) +
+  geom_boxplot(alpha = 0.1, outlier.shape = NA, size = 0.2, show.legend = FALSE) + 
+  geom_point(size = 0.7, alpha = 1, position = position_jitter(width = 0.25)) +
+  stat_compare_means(comparisons = list(c("Positive", "Negative")), method = "wilcox.test", label = "p.format", size = 1.5, tip.length = 0, bracket.size = 0.2, symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.05, 1), symbols = c("****", "***", "*", "ns"))) +
+  theme(plot.title = element_text(size = 8, face = "bold"), axis.text.x = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.ticks.y = element_line(size = 0.5), axis.line = element_blank(), axis.title = element_text(size = 7),  legend.title = element_text(size = 7, face = "bold"), legend.text = element_text(size = 6),legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt")) + 
+  ylab("Relative abundance (%)") +
+  scale_colour_manual(values = APOE_cols) +
+  ggtitle("Degu - Verrucomicrobia") + 
+  guides(color = guide_legend(title="APOE Mt4"))
+```
+
+
+
+
+
+
+# Step 5 - PICRUSt2 output analysis
+
+### PERMANOVA and PERMDISP2 for PICRUSt2 predictions
+```{r}
+picrust_abundance <- read.table(paste0(work_path, "path to path_abun_unstrat.tsv"), # edit here as needed
+                                header=TRUE, row.names = 1, sep = "\t", quote = "", stringsAsFactors = FALSE)
+picrust_abundance$description <- NULL
+picrust_abundance <- t(picrust_abundance)
+picrust_abundance <- t(apply(picrust_abundance, 1, function(x)(x/sum(x))))
+#rownames(picrust_abundance) <- gsub(".", "-", rownames(picrust_abundance), fixed = TRUE) # in case sample IDs do not match
+picrust_abundance <- picrust_abundance[order(match(rownames(picrust_abundance), rownames(samMerged))), ]
+
+picrust_abundance_degu <- picrust_abundance[samMerged$Host == "Degu", ]
+picrust_abundance_degu_disease <- picrust_abundance[samMerged$Host == "Degu" & samMerged$Condition == "AD", ]
+sam.degu.disease <- samMerged[samMerged$Host == "Degu" & samMerged$Condition == "AD", ]
+
+# PERMANOVA
+adonis(formula = picrust_abundance_degu_disease ~ APOE4, data = sam.degu.disease, method = "euclidean", permutations = 10000)
+#PERMDISP2
+beta <- betadisper(vegdist(picrust_abundance_degu_disease, method = "euclidean"), sam.degu.disease$APOE4, sqrt.dist = FALSE)
+permutest(beta, permutations = 10000)
+```
+
+### Principal component analysis of MetaCyc pathway abundances
+```{r}
+pca_res <- PCA(picrust_abundance, scale.unit = TRUE, graph = FALSE)
+d <- as.data.frame(pca_res$ind$coord)
+d$Host <- samMerged$Host
+
+ggplot(d, aes(x = Dim.1, y = Dim.2, fill = Host)) +
+  geom_point(color = "black", size = 1.5, stroke = 0.2, shape = 21) +
+  theme(plot.title = element_blank(), axis.title = element_text(size = 8), legend.title = element_text(size = 7), legend.text = element_text(size = 6), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), legend.position="top", legend.box = "vertical", axis.text = element_text(size = 5), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_rect(colour = "black", fill=NA, size=0.5)) +
+  scale_color_hue() +
+  xlab(paste0("PC1 (", round(pca_res$eig[1,2], digits = 1), "%)")) + ylab(paste0("PC2 (", round(pca_res$eig[2,2], digits = 1), "%)"))
+```
+
+### LEfSe LDA scores: AD-like degu and AD human
+Run LEfSe at http://huttenhower.sph.harvard.edu/galaxy/
+```{r}
+# degu
+lefse.degu <- read.table(paste0(work_path, "path to LEfSe results"), # edit here as needed
+                         header=FALSE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+lefse.degu <- lefse.degu[!(lefse.degu[,3] == ""), c(1,3,4)]
+lefse.degu[lefse.degu[2] == "Control", 3] <- -lefse.degu[lefse.degu[2] == "Control", 3]
+lefse.degu$hjust <- ifelse(lefse.degu[,3] > 0, 1, 0)
+lefse.degu$y <- ifelse(lefse.degu[,3] > 0, -0.03*max(lefse.degu[,3]), 0.03*max(lefse.degu[,3]))
+
+p1 <- ggplot(lefse.degu, aes(x=reorder(V1, V4), y=V4, fill=V3, label = V1, hjust = hjust)) + 
+  geom_bar(stat="identity", size = 0.1, color = "black") + 
+  geom_text(aes(y = y), size = 1.7) +
+  coord_flip() +
+  theme(plot.title = element_text(size = 8), axis.text.y = element_blank(), axis.ticks = element_blank(), axis.line.y = element_blank(), axis.title = element_text(size = 8),  legend.title = element_text(size = 6, face="bold"), legend.text = element_text(size = 5), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), panel.grid.major.x = element_line(colour="gray93", size = 0.2)) + 
+  scale_colour_manual(values = AD_cols, aesthetics = "fill") +
+  xlab("MetaCyc class") + ylab(expression('LDA score (log'[10]*' scale)')) + labs(fill = "Condition") + ggtitle("Degu") +
+  guides(fill = guide_legend(title="Condition  "))
+
+# human
+lefse.human <- read.table(paste0(work_path, "path to LEfSe results"), # edit here as needed
+                          header=FALSE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+lefse.human <- lefse.human[!(lefse.human[,3] == ""), c(1,3,4)]
+lefse.human[lefse.human[2] == "Control", 3] <- -lefse.human[lefse.human[2] == "Control", 3]
+lefse.human$hjust <- ifelse(lefse.human[,3] > 0, 1, 0)
+lefse.human$y <- ifelse(lefse.human[,3] > 0, -0.03*max(lefse.degu[,3]), 0.03*max(lefse.degu[,3]))
+
+p2 <- ggplot(lefse.human, aes(x=reorder(V1, V4), y=V4, fill=V3, label = V1, hjust = hjust)) + 
+  geom_bar(stat="identity", size = 0.1, color = "black") + 
+  geom_text(aes(y = y), size = 1.7) +
+  coord_flip() +
+  theme(plot.title = element_text(size = 8), axis.text.y = element_blank(), axis.ticks = element_blank(), axis.line.y = element_blank(), axis.title = element_text(size = 8),  legend.title = element_text(size = 6, face="bold"), legend.text = element_text(size = 5), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), panel.grid.major.x = element_line(colour="gray93", size = 0.2)) + 
+  scale_colour_manual(values = AD_cols, aesthetics = "fill") +
+  xlab("MetaCyc class") + ylab(expression('LDA score (log'[10]*' scale)')) + labs(fill = "Condition") + ggtitle("Human")
+
+leg1 <- g_legend(p1)
+
+ggarrange(ggdraw(leg1), p1 + theme(legend.position="none"), p2 + theme(legend.position="none"), 
+               ncol = 1, nrow = 3, heights = c(0.2,1,1))
+```
+
+### LEfSe LDA scores: APOE Mt4 degu and APOE4 human
+Run LEfSe at http://huttenhower.sph.harvard.edu/galaxy/
+```{r}
+# degu
+lefse.degu <- read.table(paste0(work_path, "path to LEfSe results"), # edit here as needed
+                         header=FALSE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+lefse.degu <- lefse.degu[!(lefse.degu[,3] == ""), c(1,3,4)]
+lefse.degu[lefse.degu[2] == "Negative", 3] <- -lefse.degu[lefse.degu[2] == "Negative", 3]
+lefse.degu$hjust <- ifelse(lefse.degu[,3] > 0, 1, 0)
+lefse.degu$y <- ifelse(lefse.degu[,3] > 0, -0.03*max(lefse.degu[,3]), 0.03*max(lefse.degu[,3]))
+
+p1 <- ggplot(lefse.degu, aes(x=reorder(V1, V4), y=V4, fill=V3, label = V1, hjust = hjust)) + 
+  geom_bar(stat="identity", width = 0.85, size = 0.1, color = "black") + 
+  geom_text(aes(y = y), size = 1.3) +
+  coord_flip() +
+  theme(plot.title = element_text(size = 8), axis.text.y = element_blank(), axis.ticks = element_blank(), axis.line.y = element_blank(), axis.title = element_text(size = 8),  legend.title = element_text(size = 6, face="bold"), legend.text = element_text(size = 5), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), panel.grid.major.x = element_line(colour="gray93", size = 0.2)) + 
+  scale_colour_manual(values = APOE_cols, aesthetics = "fill") +
+  xlab("MetaCyc class") + ylab(expression('LDA score (log'[10]*' scale)')) + labs(fill = "APOE4") + ggtitle("Degu") +
+  guides(fill = guide_legend(title="APOE Mt4/APOE4   ", reverse = TRUE))
+
+# human
+lefse.human <- read.table(paste0(work_path, "path to LEfSe results"), # edit here as needed
+                          header=FALSE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+lefse.human <- lefse.human[!(lefse.human[,3] == ""), c(1,3,4)]
+lefse.human[lefse.human[2] == "Negative", 3] <- -lefse.human[lefse.human[2] == "Negative", 3]
+lefse.human$hjust <- ifelse(lefse.human[,3] > 0, 1, 0)
+lefse.human$y <- ifelse(lefse.human[,3] > 0, -0.03*max(lefse.degu[,3]), 0.03*max(lefse.degu[,3]))
+
+p2 <- ggplot(lefse.human, aes(x=reorder(V1, V4), y=V4, fill=V3, label = V1, hjust = hjust)) + 
+  geom_bar(stat="identity", width = 0.85, size = 0.1, color = "black") + 
+  geom_text(aes(y = y), size = 1.3) +
+  coord_flip() +
+  theme(plot.title = element_text(size = 8), axis.text.y = element_blank(), axis.ticks = element_blank(), axis.line.y = element_blank(), axis.title = element_text(size = 8),  legend.title = element_text(size = 6, face="bold"), legend.text = element_text(size = 5), legend.key = element_blank(), legend.key.size = unit(7, "points"), legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"), panel.grid.major.x = element_line(colour="gray93", size = 0.2)) + 
+  scale_colour_manual(values = APOE_cols, aesthetics = "fill") +
+  xlab("MetaCyc class") + ylab(expression('LDA score (log'[10]*' scale)')) + labs(fill = "APOE4") + ggtitle("Human")
+
+leg1 <- g_legend(p1)
+
+ggarrange(ggdraw(leg1), p1 + theme(legend.position="none"), p2 + theme(legend.position="none"), 
+               ncol = 1, nrow = 3, heights = c(0.2,25/16,14/16))
+```
